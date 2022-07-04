@@ -1,250 +1,132 @@
-import Player     from './player/index'
-import Enemy      from './npc/enemy'
-import BackGround from './runtime/background'
-import GameInfo   from './runtime/gameinfo'
-import Music      from './runtime/music'
-import DataBus    from './databus'
+import * as THREE from 'libs/three.min.js';
+require('libs/OrbitControls.js');
+require('libs/GLTF2Loader.js');
+import HelperFunctions from 'HelperFunctions.js';
+import config from 'config.js';
 
-let ctx   = canvas.getContext('2d')
-let databus = new DataBus()
+var ctx = canvas.getContext('webgl', {
+  antialias: true,
+  preserveDrawingBuffer: true
+});
 
-wx.cloud.init({
-  // env 参数说明：
-  //   env 参数决定接下来小程序发起的云开发调用（wx.cloud.xxx）会默认请求到哪个云环境的资源
-  //   此处请填入环境 ID, 环境 ID 可打开云控制台查看
-  //   如不填则使用默认环境（第一个创建的环境）
-  // env: 'my-env-id',
-})
-const db = wx.cloud.database()
+const WIN_RATIO = window.innerWidth / window.innerHeight;
+var renderer = new THREE.WebGLRenderer({ context: ctx, canvas: canvas });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+var scene = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera(65, WIN_RATIO, 0.1, 1000);
+// camera.position.set(0, 0, 3);
+// camera.zoom = 0.5;
+var controls;
 
 /**
- * 游戏主函数
- */
-export default class Main {
-  constructor() {
-    // 维护当前requestAnimationFrame的id
-    this.aniId    = 0
-    this.personalHighScore = null
-
-    this.restart()
-    this.login()
-  }
-
-  login() {
-    // 获取 openid
-    wx.cloud.callFunction({
-      name: 'login',
-      success: res => {
-        window.openid = res.result.openid
-        this.prefetchHighScore()
-      },
-      fail: err => {
-        console.error('get openid failed with error', err)
+ * --------For loading--------(If you don't need it, remove it)
+*/
+var manager = new THREE.LoadingManager();
+manager.onStart = function(item, loaded, total){
+  console.log('Loading start...');
+  wx.showLoading({
+    title: 'Loading',
+  });
+};
+manager.onLoad = function(){
+  console.log('Loading complete');
+  wx.hideLoading();
+  wx.showModal({
+    title: 'ThreeJS Demo',
+    content: 'Tips: Tap the rabbit ear, starting recording; Tap its mouth to hear what you have recorded.',
+    showCancel: false,
+    confirmText:'Start!',
+    success: function(res){
+      if(res.confirm){
+        initControls();
       }
-    })
-  }
+    },
+  });
+}
+manager.onProgress = function(item, loaded, total){
+  let msg = 'Loaded: ' + Math.round(loaded/total*100, 2)+'%';
+  console.log(msg + '\n' + item);
+  wx.showLoading({
+    title: msg,
+  });
+};
+manager.onError = function(url){
+  console.log('[Error] on loading: ' + url);
+}
+var loader = new THREE.GLTF2Loader(manager);
 
-  prefetchHighScore() {
-    // 预取历史最高分
-    db.collection('score').doc(`${window.openid}-score`).get()
-      .then(res => {
-        if (this.personalHighScore) {
-          if (res.data.max > this.personalHighScore) {
-            this.personalHighScore = res.data.max
-          }
-        } else {
-          this.personalHighScore = res.data.max
-        }
-      })
-      .catch(err => {
-        console.error('db get score catch error', err)
-        this.prefetchHighScoreFailed = true
-      })
-  }
+/**
+ * skybox as env map
+*/
+const path = config.skyboxPath;
+const format = config.skyboxFormat;
+var envMap = new THREE.CubeTextureLoader(manager).load([
+  path + 'px' + format, path + 'nx' + format,
+  path + 'py' + format, path + 'ny' + format,
+  path + 'pz' + format, path + 'nz' + format, 
+]);
+scene.background = envMap;
 
-  restart() {
-    databus.reset()
-
-    canvas.removeEventListener(
-      'touchstart',
-      this.touchHandler
-    )
-
-    this.bg       = new BackGround(ctx)
-    this.player   = new Player(ctx)
-    this.gameinfo = new GameInfo()
-    this.music    = new Music()
-
-    this.bindLoop     = this.loop.bind(this)
-    this.hasEventBind = false
-
-    // 清除上一局的动画
-    window.cancelAnimationFrame(this.aniId);
-
-    this.aniId = window.requestAnimationFrame(
-      this.bindLoop,
-      canvas
-    )
-  }
-
-  /**
-   * 随着帧数变化的敌机生成逻辑
-   * 帧数取模定义成生成的频率
-   */
-  enemyGenerate() {
-    if ( databus.frame % 30 === 0 ) {
-      let enemy = databus.pool.getItemByClass('enemy', Enemy)
-      enemy.init(6)
-      databus.enemys.push(enemy)
-    }
-  }
-
-  // 全局碰撞检测
-  collisionDetection() {
-    let that = this
-
-    databus.bullets.forEach((bullet) => {
-      for ( let i = 0, il = databus.enemys.length; i < il;i++ ) {
-        let enemy = databus.enemys[i]
-
-        if ( !enemy.isPlaying && enemy.isCollideWith(bullet) ) {
-          enemy.playAnimation()
-          that.music.playExplosion()
-
-          bullet.visible = false
-          databus.score  += 1
-
-          break
-        }
+/**
+ * load glb models
+*/
+var rabbitMainMeshes = [];
+var rabbitEarsMeshes = [];
+var rabbitMouthMeshes = [];
+loader.load(
+  config.rabbitUrl,
+  function(gltf){
+    scene.add(gltf.scene);
+    gltf.scene.traverse(function(child){
+      if(child.isMesh){
+        child.name = 'rabbitMain';
+        child.material.envMap = envMap;
+        child.material.roughness = 0.5;
+        rabbitMainMeshes.push(child);
       }
-    })
+    });
+  }
+);
+/**
+ * add lights
+*/
+var ambientLight = new THREE.AmbientLight(0xaaaaaa);
+scene.add(ambientLight);
+var light = new THREE.DirectionalLight(0xFFCF89, 0.5);
+light.position.set(-2.24, 2.57, 6.70);
+scene.add(light);
 
-    for ( let i = 0, il = databus.enemys.length; i < il;i++ ) {
-      let enemy = databus.enemys[i]
 
-      if ( this.player.isCollideWith(enemy) ) {
-        databus.gameOver = true
+export default class Main{
+  constructor(){
 
-        // 获取历史高分
-        if (this.personalHighScore) {
-          if (databus.score > this.personalHighScore) {
-            this.personalHighScore = databus.score
-          }
-        }
-
-        // 上传结果
-        // 调用 uploadScore 云函数
-        wx.cloud.callFunction({
-          name: 'uploadScore',
-          // data 字段的值为传入云函数的第一个参数 event
-          data: {
-            score: databus.score
-          },
-          success: res => {
-            if (this.prefetchHighScoreFailed) {
-              this.prefetchHighScore()
-            }
-          },
-          fail: err => {
-            console.error('upload score failed', err)
-          }
-        })
-
-        break
-      }
-    }
+    this.loop();
   }
 
-  // 游戏结束后的触摸事件处理逻辑
-  touchEventHandler(e) {
-     e.preventDefault()
+  
 
-    let x = e.touches[0].clientX
-    let y = e.touches[0].clientY
-
-    let area = this.gameinfo.btnArea
-
-    if (   x >= area.startX
-        && x <= area.endX
-        && y >= area.startY
-        && y <= area.endY  )
-      this.restart()
+  update(){
   }
 
-  /**
-   * canvas重绘函数
-   * 每一帧重新绘制所有的需要展示的元素
-   */
-  render() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height)
-
-    this.bg.render(ctx)
-
-    databus.bullets
-          .concat(databus.enemys)
-          .forEach((item) => {
-              item.drawToCanvas(ctx)
-            })
-
-    this.player.drawToCanvas(ctx)
-
-    databus.animations.forEach((ani) => {
-      if ( ani.isPlaying ) {
-        ani.aniRender(ctx)
-      }
-    })
-
-    this.gameinfo.renderGameScore(ctx, databus.score)
-
-    // 游戏结束停止帧循环
-    if ( databus.gameOver ) {
-      this.gameinfo.renderGameOver(
-        ctx, 
-        databus.score,
-        this.personalHighScore
-      )
-
-      if ( !this.hasEventBind ) {
-        this.hasEventBind = true
-        this.touchHandler = this.touchEventHandler.bind(this)
-        canvas.addEventListener('touchstart', this.touchHandler)
-      }
-    }
+  render(){
+    renderer.render(scene, camera);
   }
 
-  // 游戏逻辑更新主函数
-  update() {
-    if ( databus.gameOver )
-      return;
+  loop(){
+    this.update();
+    this.render();
 
-    this.bg.update()
-
-    databus.bullets
-           .concat(databus.enemys)
-           .forEach((item) => {
-              item.update()
-            })
-
-    this.enemyGenerate()
-
-    this.collisionDetection()
-
-    if ( databus.frame % 20 === 0 ) {
-      this.player.shoot()
-      this.music.playShoot()
-    }
+    window.requestAnimationFrame(this.loop.bind(this), canvas);
   }
+}
 
-  // 实现游戏帧循环
-  loop() {
-    databus.frame++
-
-    this.update()
-    this.render()
-
-    this.aniId = window.requestAnimationFrame(
-      this.bindLoop,
-      canvas
-    )
-  }
+function initControls() {
+  camera.position.set(0, 1, 3);
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  // controls = new THREE.OrbitControls(camera);
+  controls.minDistance = 2;
+  controls.maxDistance = 10;
+  controls.target.set(0, 1, 0);
+  controls.update();
 }
